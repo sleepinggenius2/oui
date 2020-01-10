@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -19,6 +20,26 @@ type Organization struct {
 	Name    string
 	Address string
 }
+
+type atomicBool int32
+
+func (ab *atomicBool) Set() {
+	atomic.StoreInt32((*int32)(ab), 1)
+}
+
+func (ab *atomicBool) Unset() {
+	atomic.StoreInt32((*int32)(ab), 0)
+}
+
+func (ab *atomicBool) IsSet() bool {
+	return atomic.LoadInt32((*int32)(ab)) == 1
+}
+
+var (
+	ouis    = make(map[string]Organization)
+	loaded  = new(atomicBool)
+	loading = new(atomicBool)
+)
 
 func Download() {
 	fmt.Printf("Opening output file %s: ", OUI_FILE)
@@ -46,7 +67,6 @@ func Download() {
 	for writtenBytes < totalBytes {
 		written, err := io.CopyN(outFile, res.Body, 1024)
 		if err == io.EOF {
-			writtenBytes += written
 			break
 		} else if err != nil {
 			fmt.Println("Failed")
@@ -60,16 +80,24 @@ func Download() {
 	fmt.Printf("\rDownloading OUI file from %s: Success\n", OUI_URL)
 }
 
-var ouis map[string]Organization
-var loaded bool
-
 func Load() error {
+	if loaded.IsSet() {
+		return nil
+	}
+	if loading.IsSet() {
+		for loading.IsSet() {
+		}
+		return nil
+	}
+	loading.Set()
+
 	ouiFile, err := os.Open(OUI_FILE)
 	if err != nil {
 		if os.IsNotExist(err) {
 			Download()
 			ouiFile, err = os.Open(OUI_FILE)
-		} else {
+		}
+		if err != nil {
 			return fmt.Errorf("OUI Load|Open File: %s", err)
 		}
 	}
@@ -86,8 +114,6 @@ func Load() error {
 		return fmt.Errorf("OUI Load|Invalid CSV: Columns required: 4, found: %d", len(header))
 	}
 
-	ouis = make(map[string]Organization)
-
 	for {
 		line, err := reader.Read()
 
@@ -102,12 +128,13 @@ func Load() error {
 		}
 	}
 
-	loaded = true
+	loaded.Set()
+	loading.Unset()
 	return nil
 }
 
 func Query(address string) (org Organization, err error) {
-	if !loaded {
+	if !loaded.IsSet() {
 		err = Load()
 		if err != nil {
 			return
